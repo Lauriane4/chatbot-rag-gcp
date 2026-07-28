@@ -1,0 +1,19 @@
+# Environnement Virtuel Python
+venv/
+ENV/
+.env
+
+# Cache Python
+__pycache__/
+*.py[cod]
+
+# Base de données vectorielle locale
+chroma_db/
+
+# Fichiers de données locales
+data/raw/*
+!data/raw/.gitkeep
+
+# Fichiers système
+.DS_Store
+Thumbs.db
