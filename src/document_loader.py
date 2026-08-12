@@ -72,3 +72,32 @@ def decouper_texte(pages: list[dict], taille_chunk: int = 500, chevauchement: in
                 })
 
     return chunks
+
+def charger_dossier_pdf(chemin_dossier: str) -> list[dict]:
+    """
+    Parcourt un DOSSIER complet (y compris les sous-dossiers) 
+    et extrait le texte de TOUS les fichiers .pdf trouvés.
+
+    Args:
+        chemin_dossier (str): Le chemin vers le dossier contenant les fichiers PDF.
+
+    Returns:
+        list[dict]: La liste de toutes les pages de tous les PDF combinées.
+    """
+    if not os.path.exists(chemin_dossier):
+        raise FileNotFoundError(f"Le dossier {chemin_dossier} n'existe pas.")
+
+    toutes_les_pages = []
+
+    # os.walk explore automatiquement le dossier et tous ses sous-dossiers
+    for racine, _, fichiers in os.walk(chemin_dossier):
+        for fichier in fichiers:
+            if fichier.lower().endswith(".pdf"):
+                chemin_complet = os.path.join(racine, fichier)
+                try:
+                    pages = charger_pdf(chemin_complet)
+                    toutes_les_pages.extend(pages)
+                except Exception as e:
+                    print(f"Erreur lors de la lecture de {fichier}: {e}")
+
+    return toutes_les_pages

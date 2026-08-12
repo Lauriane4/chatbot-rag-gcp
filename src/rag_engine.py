@@ -1,15 +1,9 @@
 import os
+import requests
 from src.vector_store import GestionnaireVecteurs
 
 # Instruction système d'entreprise (Prompt Template)
-SYSTEM_PROMPT = """Tu es un assistant IA d'entreprise expert et rigoureux.
-Ton rôle est de répondre à la question de l'utilisateur en t'appuyant EXCLUSIVEMENT sur les documents fournis dans le contexte ci-dessous.
-
-Règles strictes :
-1. Si la réponse ne se trouve pas dans le contexte fourni, dis clairement "Je ne trouve pas cette information dans les documents fournis."
-2. Ne cherche pas à inventer ou à deviner une réponse basée sur tes connaissances générales.
-3. Indique la source et la page du document quand tu donnes une information si cela est pertinent.
-
+SYSTEM_PROMPT = """Tu es un assistant précis. Réponds à la question en t'appuyant UNIQUEMENT sur le contexte suivant. Si l'information n'y est pas, dis que tu ne sais pas.
 Contexte fourni :
 {contexte}
 
@@ -21,24 +15,34 @@ Réponse :"""
 
 class MoteurRAG:
     """
-    Moteur RAG (Retrieval-Augmented Generation) principal.
+    Moteur RAG (Retrieval-Augmented Generation) Agnostique.
 
-    Description :
-        Cette classe orchestre la recherche d'informations dans la base vectorielle
-        ChromaDB et la construction du prompt d'entreprise destiné au LLM.
+     Description :
+        Cette classe orchestre la recherche d'informations dans la base vectorielle,
+        construit le prompt d'entreprise et communique avec un service d'inférence LLM
+        (local ou hébergé) via une interface HTTP standard.
 
     Attributes:
         gestionnaire_db (GestionnaireVecteurs): L'instance active de la base vectorielle.
+        nom_modele (str): Le nom du modèle de langage utilisé par le service d'inférence.
+        endpoint_inference (str): L'URL du service d'inférence LLM.
     """
 
-    def __init__(self, gestionnaire_db: GestionnaireVecteurs):
+    def __init__(self, gestionnaire_db: GestionnaireVecteurs, nom_modele: str = None, endpoint_inference: str = None):
         """
         Initialise le moteur RAG avec son gestionnaire vectoriel.
 
         Args:
             gestionnaire_db (GestionnaireVecteurs): Instance de la base ChromaDB.
+            nom_modele (str): Le nom du modèle de langage utilisé par le service d'inférence.
+            endpoint_inference (str): L'URL du service d'inférence LLM.
         """
         self.db = gestionnaire_db
+        self.nom_modele = nom_modele or os.getenv("LLM_MODEL_NAME", "local-model")
+        self.endpoint_inference = endpoint_inference or os.getenv(
+            "LLM_INFERENCE_ENDPOINT", 
+            "http://localhost:11434/api/generate"
+        )
 
     def construire_contexte(self, chunks: list[dict]) -> str:
         """
@@ -70,6 +74,57 @@ class MoteurRAG:
             blocs_contexte.append(bloc)
 
         return "\n\n----------------------------------------\n\n".join(blocs_contexte)
+
+    def poser_question(self, question: str, top_k: int = 3) -> dict:
+        """
+        Exécute le pipeline RAG complet : recherche vectorielle, génération du prompt 
+        et appel au service d'inférence LLM.
+
+        Args:
+            question (str): La question posée par l'utilisateur.
+            top_k (int, optional): Nombre d'extraits pertinents à récupérer. Défaut: 3.
+
+        Returns:
+            dict: Dictionnaire contenant la question, la réponse générée et les sources d'origine.
+        """
+        # 1. Recherche des K morceaux les plus pertinents dans la base vectorielle
+        chunks_pertinents = self.db.chercher_similaires(question, nombre_resultats=top_k)
+
+        # 2. Construction du contexte et assemblage du prompt final
+        contexte_formate = self.construire_contexte(chunks_pertinents)
+        prompt_final = SYSTEM_PROMPT.format(
+            contexte=contexte_formate,
+            question=question
+        )
+
+        # 3. Préparation de la requête standard pour le service d'inférence
+        payload = {
+            "model": self.nom_modele,
+            "prompt": prompt_final,
+            "stream": False
+        }
+
+        try:
+            # Envoi de la requête HTTP au service d'inférence LLM
+            response = requests.post(self.endpoint_inference, json=payload, timeout=200)
+            response.raise_for_status()
+            donnees = response.json()
+            
+            # Extraction générique du texte généré
+            reponse_texte = donnees.get("response") or donnees.get("content") or "Aucune réponse générée."
+
+            return {
+                "question": question,
+                "reponse": reponse_texte,
+                "sources": chunks_pertinents
+            }
+
+        except Exception as e:
+            return {
+                "question": question,
+                "reponse": f"⚠️ **Service d'inférence LLM indisponible** : Impossible de contacter le serveur d'inférence à l'adresse `{self.endpoint_inference}`.\n\nDétail : `{str(e)}`",
+                "sources": chunks_pertinents
+            }
 
     def preparer_prompt(self, question: str, top_k: int = 3) -> dict:
         """
