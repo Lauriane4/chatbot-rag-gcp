@@ -1,5 +1,7 @@
 import os
-import requests
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 from src.vector_store import GestionnaireVecteurs
 
 # Instruction système d'entreprise (Prompt Template)
@@ -11,11 +13,27 @@ Question de l'utilisateur :
 {question}
 
 Réponse :"""
+# Charge les variables définies dans le fichier .env
+load_dotenv()
 
+# Prompt strict anti-hallucination
+SYSTEM_PROMPT = """Tu es un assistant IA d'entreprise expert et rigoureux.
+Réponds à la question en t'appuyant EXCLUSIVEMENT sur le contexte fourni ci-dessous.
+Sois précis, concis et ne donne que des informations réelles présentes dans le texte.
+
+Règles strictes :
+1. Si l'information ne se trouve pas dans le contexte, réponds : "Je ne trouve pas cette information dans les documents fournis."
+2. Ne fais aucune supposition et n'invente rien.
+
+Contexte :
+{contexte}
+
+Question : {question}
+Réponse :"""
 
 class MoteurRAG:
     """
-    Moteur RAG (Retrieval-Augmented Generation) Agnostique.
+    Moteur RAG (Retrieval-Augmented Generation).
 
      Description :
         Cette classe orchestre la recherche d'informations dans la base vectorielle,
@@ -25,24 +43,22 @@ class MoteurRAG:
     Attributes:
         gestionnaire_db (GestionnaireVecteurs): L'instance active de la base vectorielle.
         nom_modele (str): Le nom du modèle de langage utilisé par le service d'inférence.
-        endpoint_inference (str): L'URL du service d'inférence LLM.
+    
     """
 
-    def __init__(self, gestionnaire_db: GestionnaireVecteurs, nom_modele: str = None, endpoint_inference: str = None):
+    def __init__(self, gestionnaire_db: GestionnaireVecteurs, nom_modele: str = "gemini-3.6-flash"):
         """
         Initialise le moteur RAG avec son gestionnaire vectoriel.
 
         Args:
             gestionnaire_db (GestionnaireVecteurs): Instance de la base ChromaDB.
             nom_modele (str): Le nom du modèle de langage utilisé par le service d'inférence.
-            endpoint_inference (str): L'URL du service d'inférence LLM.
+            
         """
         self.db = gestionnaire_db
         self.nom_modele = nom_modele or os.getenv("LLM_MODEL_NAME", "local-model")
-        self.endpoint_inference = endpoint_inference or os.getenv(
-            "LLM_INFERENCE_ENDPOINT", 
-            "http://localhost:11434/api/generate"
-        )
+        api_key = os.getenv("GEMINI_API_KEY")
+        self.client = genai.Client(api_key=api_key) if api_key else None
 
     def construire_contexte(self, chunks: list[dict]) -> str:
         """
@@ -75,56 +91,6 @@ class MoteurRAG:
 
         return "\n\n----------------------------------------\n\n".join(blocs_contexte)
 
-    def poser_question(self, question: str, top_k: int = 3) -> dict:
-        """
-        Exécute le pipeline RAG complet : recherche vectorielle, génération du prompt 
-        et appel au service d'inférence LLM.
-
-        Args:
-            question (str): La question posée par l'utilisateur.
-            top_k (int, optional): Nombre d'extraits pertinents à récupérer. Défaut: 3.
-
-        Returns:
-            dict: Dictionnaire contenant la question, la réponse générée et les sources d'origine.
-        """
-        # 1. Recherche des K morceaux les plus pertinents dans la base vectorielle
-        chunks_pertinents = self.db.chercher_similaires(question, nombre_resultats=top_k)
-
-        # 2. Construction du contexte et assemblage du prompt final
-        contexte_formate = self.construire_contexte(chunks_pertinents)
-        prompt_final = SYSTEM_PROMPT.format(
-            contexte=contexte_formate,
-            question=question
-        )
-
-        # 3. Préparation de la requête standard pour le service d'inférence
-        payload = {
-            "model": self.nom_modele,
-            "prompt": prompt_final,
-            "stream": False
-        }
-
-        try:
-            # Envoi de la requête HTTP au service d'inférence LLM
-            response = requests.post(self.endpoint_inference, json=payload, timeout=200)
-            response.raise_for_status()
-            donnees = response.json()
-            
-            # Extraction générique du texte généré
-            reponse_texte = donnees.get("response") or donnees.get("content") or "Aucune réponse générée."
-
-            return {
-                "question": question,
-                "reponse": reponse_texte,
-                "sources": chunks_pertinents
-            }
-
-        except Exception as e:
-            return {
-                "question": question,
-                "reponse": f"⚠️ **Service d'inférence LLM indisponible** : Impossible de contacter le serveur d'inférence à l'adresse `{self.endpoint_inference}`.\n\nDétail : `{str(e)}`",
-                "sources": chunks_pertinents
-            }
 
     def preparer_prompt(self, question: str, top_k: int = 3) -> dict:
         """
@@ -155,3 +121,49 @@ class MoteurRAG:
             "contexte": contexte_formate,
             "prompt_final": prompt_final
         }
+
+
+    def poser_question(self, question: str, top_k: int = 3) -> dict:
+        """
+        Exécute le pipeline RAG complet : recherche vectorielle, génération du prompt 
+        et appel au service d'inférence LLM.
+
+        Args:
+            question (str): La question posée par l'utilisateur.
+            top_k (int, optional): Nombre d'extraits pertinents à récupérer. Défaut: 3.
+
+        Returns:
+            dict: Dictionnaire contenant la question, la réponse générée et les sources d'origine.
+        """
+        donnees_prompt = self.preparer_prompt(question, top_k=top_k)
+        chunks_pertinents = donnees_prompt["chunks"]
+        prompt_final = donnees_prompt["prompt_final"]
+
+        if not self.client:
+            return {
+                "question": question,
+                "reponse": "⚠️ **Clé API manquante** : Vérifie que `GEMINI_API_KEY` est bien définie dans ton fichier `.env`.",
+                "sources": chunks_pertinents
+            }
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.nom_modele,
+                contents=prompt_final,
+                config=types.GenerateContentConfig(
+                    temperature=0.0
+                )
+            )
+
+            return {
+                "question": question,
+                "reponse": response.text,
+                "sources": chunks_pertinents
+            }
+
+        except Exception as e:
+            return {
+                "question": question,
+                "reponse": f"⚠️ **Erreur lors de l'appel au modèle** : `{str(e)}`",
+                "sources": chunks_pertinents
+            }

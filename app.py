@@ -21,15 +21,10 @@ def initialiser_rag():
     # 1. On crée d'abord l'instance de la base vectorielle
     db = GestionnaireVecteurs()
     
-    # 2. On récupère les configurations d'environnement
-    modele = os.getenv("LLM_MODEL_NAME", "qwen2.5:0.5b")
-    endpoint = os.getenv("LLM_INFERENCE_ENDPOINT", "http://localhost:11434/api/generate")
-    
-    # 3. On passe l'instance 'db' au moteur RAG
+    # 2. On passe l'instance 'db' au moteur RAG
     rag = MoteurRAG(
         gestionnaire_db=db,
-        nom_modele=modele,
-        endpoint_inference=endpoint
+    
     )
     return db, rag
 
