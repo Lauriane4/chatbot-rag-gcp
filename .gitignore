@@ -21,3 +21,4 @@ Thumbs.db
 # Logs et fichiers temporaires
 *.log
 *.logs
+*feedback*.csv
