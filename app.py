@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-from src.document_loader import charger_dossier_pdf, decouper_texte
+from src.document_loader import ProcesseurDocuments
 from src.vector_store import GestionnaireVecteurs
 from src.rag_engine import MoteurRAG
 
@@ -20,6 +20,7 @@ st.markdown("Interroge les documents, guidelines et présentations de l'entrepri
 def initialiser_rag():
     # 1. On crée d'abord l'instance de la base vectorielle
     db = GestionnaireVecteurs()
+
     
     # 2. On passe l'instance 'db' au moteur RAG
     rag = MoteurRAG(
@@ -49,15 +50,15 @@ else:
 
 # Bouton pour lancer l'indexation de tout le dossier
 if st.sidebar.button("🔄 Indexer / Mettre à jour la base"):
-    with st.spinner("Ingestion des documents et calcul des embeddings en cours..."):
+    with st.spinner("Ingestion des documents (PDF, Word, Excel, PPTX) en cours..."):
         try:
-            pages = charger_dossier_pdf(dossier_documents)
-            if pages:
-                chunks = decouper_texte(pages)
-                nb_ajoutes = db.ajouter_chunks(chunks)
-                st.sidebar.success(f"Succès ! {nb_ajoutes} chunks indexés.")
+            processeur = ProcesseurDocuments()
+            chunks = processeur.traiter_dossier(dossier_documents)
+            if chunks:
+                db.ajouter_chunks(chunks)
+                st.sidebar.success(f"Succès ! {len(chunks)} chunks indexés.")
             else:
-                st.sidebar.warning("Le dossier est vide ou aucun texte extractible trouvé.")
+                st.sidebar.warning("Aucun document extractible trouvé.")
         except Exception as e:
             st.sidebar.error(f"Erreur : {str(e)}")
 
@@ -84,7 +85,7 @@ if question_utilisateur := st.chat_input("Pose ta question sur les documents..."
     with st.chat_message("assistant"):
         with st.spinner("Recherche dans les documents de l'entreprise..."):
             # Appel de notre méthode RAG
-            resultat = rag.poser_question(question_utilisateur, top_k=6)
+            resultat = rag.poser_question(question_utilisateur, top_k=10)
             reponse_texte = resultat["reponse"]
             sources = resultat["sources"]
 

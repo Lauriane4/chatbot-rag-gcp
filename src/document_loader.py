@@ -1,103 +1,178 @@
 import os
-from pypdf import PdfReader
-from datetime import datetime
+import pypdf
+import pandas as pd
+from docx import Document
+from pptx import Presentation
 
-def charger_pdf(chemin_pdf: str) -> list[dict]:
-    """ 
-    Lit un fichier PDF et extrait le texte page par page avec ses métadonnées.
-    
-    Args:
-        chemin_pdf (str): Le chemin vers le fichier PDF.
-        
-    Returns:
-        list[dict]: Une liste de dictionnaires contenant le texte et les métadonnées.
-    """
-    
-    if not os.path.exists(chemin_pdf):
-        raise FileNotFoundError(f"Le fichier {chemin_pdf} n'existe pas.")
 
-    lecteur = PdfReader(chemin_pdf)
-    nom_fichier = os.path.basename(chemin_pdf)
-    pages_extraites = []
+class ProcesseurDocuments:
+    """Processeur polyvalent pour l'extraction et le découpage de documents d'entreprise.
 
-    for index, page in enumerate(lecteur.pages):
-        texte_page = page.extract_text()
-        if texte_page and texte_page.strip():
-            pages_extraites.append({
-                "page_number": index + 1,
-                "text": texte_page.strip(),
-                "source": nom_fichier
-            })
+    Prend en charge les formats : .pdf, .docx, .xlsx, .pptx.
 
-    return pages_extraites
-
-def decouper_texte(pages: list[dict], taille_chunk: int = 500, chevauchement: int = 50) -> list[dict]:
-    """
-    Découpe le texte extrait des pages en morceaux (chunks) de taille spécifiée avec un chevauchement donné. 
-    Args:
-        pages (list[dict]): Liste de dictionnaires contenant le texte et les métadonnées des pages.
-        taille_chunk (int): Nombre de mots par chunk.
-        chevauchement (int): Nombre de mots qui se chevauchent entre les chunks.
-    Returns:
-        list[dict]: Une liste de dictionnaires contenant les chunks de texte et leurs métadonnées.
+    Attributes:
+        taille_chunk (int): Taille cible d'un extrait de texte (en caractères).
+        recouvrement (int): Nombre de caractères partagés entre deux chunks consécutifs.
     """
 
-    chunks = []
-    chunk_id = 0
+    def __init__(self, taille_chunk: int = 1000, recouvrement: int = 150):
+        """Initialise le processeur de documents.
 
-    horodatage = datetime.now().strftime("%Y%m%d_%H%M%S")
+        Args:
+            taille_chunk (int, optional): Taille cible en caractères d'un chunk. Défaut: 1000.
+            recouvrement (int, optional): Chevauchement entre chunks consécutifs. Défaut: 150.
+        """
+        self.taille_chunk = taille_chunk
+        self.recouvrement = recouvrement
 
-    for page in pages:
-        mots = page["text"].split()
+    # ==========================================
+    # 1. EXTRACTEURS PAR TYPE DE FORMAT
+    # ==========================================
 
-        pas = taille_chunk - chevauchement
+    def _extraire_pdf(self, chemin_fichier: str) -> list[dict]:
+        """Extrait le texte page par page depuis un PDF."""
+        extraits = []
+        with open(chemin_fichier, "rb") as f:
+            lecteur = pypdf.PdfReader(f)
+            for num_page, page in enumerate(lecteur.pages, start=1):
+                texte = page.extract_text()
+                if texte and texte.strip():
+                    extraits.append({
+                        "texte": texte.strip(),
+                        "page": num_page
+                    })
+        return extraits
 
-        for i in range(0, len(mots), pas):
-            sous_liste_mots = mots[i:i + taille_chunk]
-            morceau = " ".join(sous_liste_mots)
+    def _extraire_docx(self, chemin_fichier: str) -> list[dict]:
+        """Extrait les paragraphes et tableaux d'un document Word (.docx)."""
+        doc = Document(chemin_fichier)
+        lignes = []
 
-            if morceau.strip():
-                chunk_id += 1
+        # Paragraphes
+        for para in doc.paragraphs:
+            if para.text.strip():
+                lignes.append(para.text.strip())
 
-                id_unique = f"{page['source']}_{horodatage}_chunk_{chunk_id}"
+        # Tableaux Word
+        for table in doc.tables:
+            lignes.append("\n--- Tableau ---")
+            for row in table.rows:
+                cellules = [cell.text.strip() for cell in row.cells]
+                lignes.append(" | ".join(cellules))
 
-                chunks.append({
-                    "id": id_unique,
-                    "text": morceau,
-                    "metadata": {
-                        "source": page["source"],
-                        "page": page["page_number"],
-                        "total_mots": len(morceau.split())
-                    }
+        texte_global = "\n".join(lignes)
+        return [{"texte": texte_global, "page": 1}] if texte_global.strip() else []
+
+    def _extraire_pptx(self, chemin_fichier: str) -> list[dict]:
+        """Extrait le texte slide par slide d'une présentation PowerPoint (.pptx)."""
+        prs = Presentation(chemin_fichier)
+        extraits = []
+
+        for num_slide, slide in enumerate(prs.slides, start=1):
+            textes_slide = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for paragraph in shape.text_frame.paragraphs:
+                        if paragraph.text.strip():
+                            textes_slide.append(paragraph.text.strip())
+            
+            if textes_slide:
+                extraits.append({
+                    "texte": "\n".join(textes_slide),
+                    "page": num_slide
                 })
+        return extraits
 
-    return chunks
+    def _extraire_xlsx(self, chemin_fichier: str) -> list[dict]:
+        """Convertit les feuilles et lignes Excel (.xlsx) en texte sémantique structuré."""
+        extraits = []
+        fichier_excel = pd.ExcelFile(chemin_fichier)
 
-def charger_dossier_pdf(chemin_dossier: str) -> list[dict]:
-    """
-    Parcourt un DOSSIER complet (y compris les sous-dossiers) 
-    et extrait le texte de TOUS les fichiers .pdf trouvés.
+        for sheet_name in fichier_excel.sheet_names:
+            df = pd.read_excel(chemin_fichier, sheet_name=sheet_name)
+            if df.empty:
+                continue
 
-    Args:
-        chemin_dossier (str): Le chemin vers le dossier contenant les fichiers PDF.
+            lignes_texte = [f"### Feuille / Tableau : {sheet_name}"]
+            for index, row in df.iterrows():
+                elements = []
+                for col in df.columns:
+                    val = row[col]
+                    if pd.notna(val):
+                        elements.append(f"{col}: {val}")
+                if elements:
+                    lignes_texte.append(f"- Entrée {index + 1} : " + " | ".join(elements))
 
-    Returns:
-        list[dict]: La liste de toutes les pages de tous les PDF combinées.
-    """
-    if not os.path.exists(chemin_dossier):
-        raise FileNotFoundError(f"Le dossier {chemin_dossier} n'existe pas.")
+            texte_feuille = "\n".join(lignes_texte)
+            extraits.append({
+                "texte": texte_feuille,
+                "page": sheet_name  # Utilise le nom de l'onglet comme repère
+            })
+        return extraits
 
-    toutes_les_pages = []
+    # ==========================================
+    # 2. CHARGEMENT UNIFIÉ & DECOUPAGE (CHUNKING)
+    # ==========================================
 
-    # os.walk explore automatiquement le dossier et tous ses sous-dossiers
-    for racine, _, fichiers in os.walk(chemin_dossier):
-        for fichier in fichiers:
-            if fichier.lower().endswith(".pdf"):
-                chemin_complet = os.path.join(racine, fichier)
-                try:
-                    pages = charger_pdf(chemin_complet)
-                    toutes_les_pages.extend(pages)
-                except Exception as e:
-                    print(f"Erreur lors de la lecture de {fichier}: {e}")
+    def charger_document(self, chemin_fichier: str) -> list[dict]:
+        """Identifie l'extension du fichier et extrait son contenu textuel."""
+        _, extension = os.path.splitext(chemin_fichier.lower())
 
-    return toutes_les_pages
+        if extension == ".pdf":
+            return self._extraire_pdf(chemin_fichier)
+        elif extension == ".docx":
+            return self._extraire_docx(chemin_fichier)
+        elif extension == ".pptx":
+            return self._extraire_pptx(chemin_fichier)
+        elif extension in [".xlsx", ".xls"]:
+            return self._extraire_xlsx(chemin_fichier)
+        else:
+            return []
+
+    def decouper_texte(self, texte: str) -> list[str]:
+        """Découpe un texte long en chunks chevauchants."""
+        if len(texte) <= self.taille_chunk:
+            return [texte]
+
+        chunks = []
+        debut = 0
+        while debut < len(texte):
+            fin = debut + self.taille_chunk
+            chunk = texte[debut:fin]
+            chunks.append(chunk.strip())
+            debut += self.taille_chunk - self.recouvrement
+        return chunks
+
+    def traiter_dossier(self, dossier_racine: str) -> list[dict]:
+        """Scanne récursivement un dossier et retourne tous les chunks prêts pour ChromaDB.
+
+        Args:
+            dossier_racine (str): Chemin du dossier contenant l'ensemble des sous-dossiers.
+
+        Returns:
+            list[dict]: Liste des chunks formatés avec texte et métadonnées complètes.
+        """
+        extensions_valides = {".pdf", ".docx", ".pptx", ".xlsx", ".xls"}
+        chunks_finaux = []
+
+        for racine, _, fichiers in os.walk(dossier_racine):
+            for fichier in fichiers:
+                _, ext = os.path.splitext(fichier.lower())
+                if ext in extensions_valides:
+                    chemin_complet = os.path.join(racine, fichier)
+                    pages_extraites = self.charger_document(chemin_complet)
+
+                    for item in pages_extraites:
+                        morceaux = self.decouper_texte(item["texte"])
+                        for idx_chunk, morceau in enumerate(morceaux, start=1):
+                            if morceau:
+                                chunks_finaux.append({
+                                    "texte": morceau,
+                                    "metadata": {
+                                        "source": fichier,
+                                        "chemin_relatif": os.path.relpath(chemin_complet, dossier_racine),
+                                        "page": str(item["page"]),
+                                        "chunk_id": idx_chunk
+                                    }
+                                })
+        return chunks_finaux
