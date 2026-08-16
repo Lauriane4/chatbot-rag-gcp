@@ -17,3 +17,7 @@ data/raw/*
 # Fichiers système
 .DS_Store
 Thumbs.db
+
+# Logs et fichiers temporaires
+*.log
+*.logs

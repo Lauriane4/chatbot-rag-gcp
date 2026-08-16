@@ -1,8 +1,10 @@
 import os
+import uuid
 import streamlit as st
 from src.document_loader import ProcesseurDocuments
 from src.vector_store import GestionnaireVecteurs
 from src.rag_engine import MoteurRAG
+from src.feedback_logger import GestionnaireFeedback
 
 # Configuration de la page Streamlit
 st.set_page_config(
@@ -20,17 +22,15 @@ st.markdown("Interroge les documents, guidelines et présentations de l'entrepri
 def initialiser_rag():
     # 1. On crée d'abord l'instance de la base vectorielle
     db = GestionnaireVecteurs()
-
-    
     # 2. On passe l'instance 'db' au moteur RAG
-    rag = MoteurRAG(
-        gestionnaire_db=db,
+    rag = MoteurRAG( gestionnaire_db=db)
+    # 3. On initialise le gestionnaire de feedback
+    logger_feedback = GestionnaireFeedback()
     
-    )
-    return db, rag
+    return db, rag, logger_feedback
 
 # Appel de la fonction
-db, rag = initialiser_rag()
+db, rag, logger_feedback = initialiser_rag()
 
 # --- BARRE LATÉRALE : GESTION DES DOCUMENTS ---
 st.sidebar.header("📁 Base de Connaissances")
@@ -70,14 +70,63 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # Affichage de l'historique des messages
+# Affichage de l'historique des messages et des boutons de feedback
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+        # Affichage des sources et des boutons uniquement pour les réponses du bot
+        if message["role"] == "assistant":
+            if message.get("sources"):
+                with st.expander("📌 Sources consultées pour cette réponse"):
+                    for i, src in enumerate(message["sources"], 1):
+                        nom_source = src["metadata"].get("source", "Inconnue")
+                        page = src["metadata"].get("page", "Inconnue")
+                        st.markdown(f"**Extrait {i}** — Fichier : `{nom_source}` (Page/Slide : {page})")
+                        st.caption(f"> {src['texte'][:200]}...")
+
+            # Boutons de vote 👍 / 👎
+            msg_id = message.get("id", "legacy")
+            col1, col2, col_info = st.columns([1, 1, 10])
+
+            with col1:
+                if st.button("👍", key=f"up_{msg_id}", disabled=(message.get("feedback") == "positif")):
+                    message["feedback"] = "positif"
+                    logger_feedback.enregistrer_interaction(
+                        id_interaction=msg_id,
+                        question=message.get("question_origine", ""),
+                        reponse=message["content"],
+                        sources=message.get("sources", []),
+                        note="positif"
+                    )
+                    st.rerun()
+
+            with col2:
+                if st.button("👎", key=f"down_{msg_id}", disabled=(message.get("feedback") == "negatif")):
+                    message["feedback"] = "negatif"
+                    logger_feedback.enregistrer_interaction(
+                        id_interaction=msg_id,
+                        question=message.get("question_origine", ""),
+                        reponse=message["content"],
+                        sources=message.get("sources", []),
+                        note="negatif"
+                    )
+                    st.rerun()
+
+            with col_info:
+                if message.get("feedback") == "positif":
+                    st.caption("✅ Merci pour votre retour !")
+                elif message.get("feedback") == "negatif":
+                    st.caption("⚠️ Retour pris en compte.")
+
 # Champ de saisie pour poser une question
 if question_utilisateur := st.chat_input("Pose ta question sur les documents..."):
-    # 1. Afficher la question de l'utilisateur
-    st.session_state.messages.append({"role": "user", "content": question_utilisateur})
+    # 1. Afficher la question de l'utilisateur avec un identifiant unique
+    st.session_state.messages.append({
+        "id": str(uuid.uuid4()),
+        "role": "user",
+        "content": question_utilisateur
+    })
     with st.chat_message("user"):
         st.markdown(question_utilisateur)
 
@@ -101,5 +150,13 @@ if question_utilisateur := st.chat_input("Pose ta question sur les documents..."
                         st.markdown(f"**Extrait {i}** — Fichier : `{nom_source}` (Page/Slide : {page})")
                         st.caption(f"> {src['texte'][:200]}...")
 
-        # Sauvegarder la réponse dans l'historique
-        st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
+        # Sauvegarder la réponse dans l'historique avec métadonnées pour le feedback
+        st.session_state.messages.append({
+            "id": str(uuid.uuid4()),
+            "role": "assistant",
+            "content": reponse_texte,
+            "sources": sources,
+            "question_origine": question_utilisateur,
+            "feedback": None
+        })
+        st.rerun()
