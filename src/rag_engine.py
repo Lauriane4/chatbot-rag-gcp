@@ -4,32 +4,31 @@ from google import genai
 from google.genai import types
 from src.vector_store import GestionnaireVecteurs
 
-# Instruction système d'entreprise (Prompt Template)
-SYSTEM_PROMPT = """Tu es un assistant précis. Réponds à la question en t'appuyant UNIQUEMENT sur le contexte suivant. Si l'information n'y est pas, dis que tu ne sais pas.
-Contexte fourni :
-{contexte}
-
-Question de l'utilisateur :
-{question}
-
-Réponse :"""
 # Charge les variables définies dans le fichier .env
 load_dotenv()
 
-# Prompt strict anti-hallucination
+# Prompt strict anti-hallucination + citation systématique des sources
 SYSTEM_PROMPT = """Tu es un assistant IA d'entreprise expert et rigoureux.
 Réponds à la question en t'appuyant EXCLUSIVEMENT sur le contexte fourni ci-dessous.
 Sois précis, concis et ne donne que des informations réelles présentes dans le texte.
 
 Règles strictes :
-1. Si l'information ne se trouve pas dans le contexte, réponds : "Je ne trouve pas cette information dans les documents fournis."
+1. Si l'information ne se trouve pas dans le contexte, réponds : "Je ne trouve pas cette information dans les documents fournis." (et ne cite aucune source dans ce cas)
 2. Ne fais aucune supposition et n'invente rien.
+3. Cite SYSTÉMATIQUEMENT ta source à la fin de chaque affirmation, sous la forme exacte :
+   (Source : NOM_DU_FICHIER, Page/Slide : X)
+   Utilise le nom de fichier et le numéro de page/slide indiqués dans l'en-tête de l'extrait
+   correspondant du contexte (jamais le numéro d'extrait seul, ex. "Extrait 3").
+4. Si toute ta réponse s'appuie sur une seule source, une seule citation à la fin suffit.
+   Si plusieurs extraits de sources différentes sont utilisés, cite chaque information avec
+   sa source respective.
 
 Contexte :
 {contexte}
 
 Question : {question}
 Réponse :"""
+
 
 class MoteurRAG:
     """
@@ -43,7 +42,7 @@ class MoteurRAG:
     Attributes:
         gestionnaire_db (GestionnaireVecteurs): L'instance active de la base vectorielle.
         nom_modele (str): Le nom du modèle de langage utilisé par le service d'inférence.
-    
+
     """
 
     def __init__(self, gestionnaire_db: GestionnaireVecteurs, nom_modele: str = "gemini-3.6-flash"):
@@ -53,7 +52,7 @@ class MoteurRAG:
         Args:
             gestionnaire_db (GestionnaireVecteurs): Instance de la base ChromaDB.
             nom_modele (str): Le nom du modèle de langage utilisé par le service d'inférence.
-            
+
         """
         self.db = gestionnaire_db
         self.nom_modele = nom_modele or os.getenv("LLM_MODEL_NAME", "local-model")
@@ -91,7 +90,6 @@ class MoteurRAG:
 
         return "\n\n----------------------------------------\n\n".join(blocs_contexte)
 
-
     def preparer_prompt(self, question: str, top_k: int = 3) -> dict:
         """
         Interroge ChromaDB pour trouver les chunks pertinents et génère le prompt final.
@@ -103,13 +101,9 @@ class MoteurRAG:
         Returns:
             dict: Dictionnaire contenant la question, le contexte extrait et le prompt complet.
         """
-        # 1. Recherche des K morceaux les plus pertinents dans ChromaDB
         chunks_pertinents = self.db.chercher_similaires(question, nombre_resultats=top_k)
-
-        # 2. Mise en forme du texte de contexte
         contexte_formate = self.construire_contexte(chunks_pertinents)
 
-        # 3. Injection du contexte et de la question dans notre modèle de prompt
         prompt_final = SYSTEM_PROMPT.format(
             contexte=contexte_formate,
             question=question
@@ -122,10 +116,9 @@ class MoteurRAG:
             "prompt_final": prompt_final
         }
 
-
     def poser_question(self, question: str, top_k: int = 3) -> dict:
         """
-        Exécute le pipeline RAG complet : recherche vectorielle, génération du prompt 
+        Exécute le pipeline RAG complet : recherche vectorielle, génération du prompt
         et appel au service d'inférence LLM.
 
         Args:
